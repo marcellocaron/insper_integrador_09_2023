@@ -1,0 +1,369 @@
+---
+title: "atividade_integradora_modelagem"
+author: "Murilo Cechin"
+date: "2023-09-05"
+output: html_document
+---
+
+# Modelagem Atividade Interadora em R
+
+Arquivo de modelagem da atividade integradora.
+
+O grupo selecionou os seguintes algoritimos para realizar a modelagem de classificação:
+
+
+- Random Forest
+- Regressão Logistica
+- KNN
+- Ridge
+
+
+
+## Bibliotecas utilizadas no projeto
+
+
+```{r}
+library(tidyverse)
+library(rsample)
+library(glmnet)
+library(ranger)
+library(pROC)
+library(class)
+```
+
+
+## Importando o arquivo
+
+
+```{r}
+df_final = read.csv("C:/Users/GBinfo/Meu Drive/Murilo Cechin/DATA SCIENCE/Insper - Pós/1-Trimestre/Projeto_integrador/df_final.csv")
+
+head(df_final, 10)
+```
+Antes de proceguir com a modelagem é necessario retirar algumas colunas deste dataframe
+Como a coluna X, que representa o index do pré-processamento em python.
+
+```{r}
+df_final$X <- NULL
+```
+
+Além disso, iremos retirar a coluna comp_id.
+
+```{r}
+df_final$comp_id <- NULL
+```
+
+
+
+
+### Modelagem
+
+#### Conjunto de Teste e Treinamento
+
+Separando os conjuntos de teste e treinamento.
+
+Antes, vamos analisar se o cojunto de dados esta desbalanceado.
+
+```{r}
+# Analise das frequencia
+
+df_final %>%
+  group_by(preditora) %>%
+  summarise(freq_absoluta = n()) %>%
+  mutate(freq_relativa = (freq_absoluta / sum(freq_absoluta))*100)
+
+```
+Como temos um conjunto bastante desbalanceado, ao realizar o sample corremos o risco de não coletar informações suficientes.
+
+```{r}
+# Configurando semente aleatoria
+set.seed(123)
+
+# Aplicando função factor
+
+df_final$preditora <- factor(df_final$preditora)
+
+splits <- initial_split(df_final, prop = .8, strata="preditora")
+
+conj_treinamento <- training(splits)
+conj_teste <- testing(splits)
+```
+
+Conferindo proporções dos conjuntos de teste e treinamento.
+
+```{r}
+# Conferindo proporção do conjunto de teste
+conj_teste %>%
+  group_by(preditora) %>%
+  summarise(freq_absoluta = n()) %>%
+  mutate(freq_relativa = (freq_absoluta / sum(freq_absoluta))*100)
+```
+```{r}
+# Conferindo conjunto de treinamento
+conj_treinamento %>%
+  group_by(preditora) %>%
+  summarise(freq_absoluta = n()) %>%
+  mutate(freq_relativa = (freq_absoluta / sum(freq_absoluta))*100)
+```
+
+Como pode ser obsevado , a estritificação funcionou.
+
+#### Criando Tabela de comparação
+
+Como métrica de comparação dos modelos, o grupo escolheu a medida AUC.
+
+
+```{r}
+tb_auc <- tibble(
+  modelo = c("Ridge", "Regressão Logistica", "KNN", "Random Forest"),
+  AUC = c(NA, NA, NA, NA)
+)
+
+tb_auc
+```
+
+#### Random Forest
+
+Criando modelagem com algoritmo random forest.
+
+```{r}
+random <- ranger(preditora ~., data=conj_treinamento)
+
+print(random)
+```
+Verificando matrix de confusão:
+
+```{r}
+random$confusion.matrix
+```
+
+Otimiziando o hiperparametro de número de arvores
+
+```{r}
+random_ntree <- tibble(n_arvores = c(1:15, seq(25, 300, 25)), erro = NA)
+
+random_ntree <- random_ntree %>%
+  mutate(erro = map_dbl(n_arvores, ~ranger(preditora ~ ., num.trees = .x, data=conj_treinamento)$prediction.error))
+
+random_ntree %>% 
+  ggplot(aes(n_arvores, erro)) + 
+    geom_line(color = "#5B5FFF", size = 1.2) + 
+    labs(x = "Número de Árvores", y = "Erro de Classificação (OOB)") + 
+    theme_bw()
+
+```
+Otimizando o mtry e o número de árvores.
+
+```{r}
+resultados <- crossing(mtry = c(4, 8, 15, 19), 
+                       n_arvores = c(1, 5, 10, seq(25, 300, 25)))
+
+ajusta <- function(mtry, n_arvores) {
+   random <- ranger(preditora ~ ., num.trees = n_arvores, mtry = mtry, data = conj_treinamento)
+   return(random$prediction.error)
+}
+
+resultados <- resultados %>% 
+  mutate(erro = map2_dbl(mtry, n_arvores, ajusta))
+
+
+head(resultados)
+```
+
+Plotando os resultados
+```{r}
+resultados %>% 
+  mutate(mtry = factor(mtry)) %>% 
+  ggplot(aes(n_arvores, erro, group = mtry, color = mtry)) + 
+    geom_line( size = 1.2) +
+    labs(x = "Número de Árvores", y = "Erro de Classificação (OOB)") +
+    theme_bw()
+```
+
+Analisando resultados com os menores erros:
+```{r}
+resultados %>%
+  arrange(erro)
+```
+
+A árvore otimizada é com mtry=4 e n_arvores = 175.
+
+```{r}
+random_final <- ranger(preditora ~., data=conj_treinamento, num.trees = 175, mtry=4)
+
+print(random_final)
+```
+Ánalisando a importancia das variaveis preditoras
+
+```{r}
+rf1 <- ranger(preditora ~ ., importance = "impurity", data = conj_treinamento, num.trees = 175, mtry=4)
+grafico1 <- vip::vip(rf1, aesthetics = list(fill = "#FF5757")) 
+
+rf2 <- ranger(preditora ~ ., importance = "permutation", data = conj_treinamento, num.trees = 175, mtry=4)
+grafico2 <- vip::vip(rf2, aesthetics = list(fill = "#FF5757"))
+```
+
+Utilizando o argumento impurity
+```{r}
+grafico1
+```
+Utilizando o argumento permutation
+
+```{r}
+grafico2
+```
+Cálculando a área AUC para o modelo otimizado.
+
+```{r}
+# Realizando previsões com o modelo 
+random_predict <- predict(random_final, data = conj_teste)
+
+# Pegando as probabilidades
+probs <- random_predict$predictions
+
+probs_numeric <- as.numeric(as.character(random_predict$predictions)) - 1
+labels_numeric <- as.numeric(as.character(conj_teste$preditora))
+
+# Utilizando biblioteca pROC para calcular AUC
+
+roc_obj <- roc(labels_numeric, probs_numeric)
+auc(roc_obj)
+```
+Adicionando resultado para dataframe de comparação
+
+```{r}
+tb_auc$AUC[tb_auc$modelo == "Random Forest"] = auc(roc_obj)
+
+tb_auc
+```
+
+
+
+
+
+
+#### Regressão Logistica
+
+Treinando o modelo
+
+
+```{r}
+log_fit <- glm(preditora ~., data = conj_treinamento, family = "binomial")
+
+log_fit
+```
+
+Cálculando as probabilidades
+
+```{r}
+prob_log <- predict(log_fit, conj_teste, type = "response")
+```
+
+
+Cálculando métrica AUC:
+
+```{r}
+roc_log <- roc(conj_teste$preditora, prob_log)
+
+roc_log
+```
+
+Adicionando AUC para a tabela de resultados
+
+```{r}
+tb_auc$AUC[tb_auc$modelo == "Regressão Logistica"] = roc_log$auc
+
+tb_auc
+```
+
+
+#### KNN
+
+Modelando para 5 vizinhos
+
+
+```{r}
+
+knn_treinamento <- conj_treinamento[, -which(names(conj_treinamento) == "preditora")]
+knn_teste <- conj_teste[, -which(names(conj_teste) == "preditora")]
+treinamento_label <- conj_treinamento$preditora
+
+knn_prob <- class::knn(knn_treinamento, knn_teste, treinamento_label, k=5)
+
+```
+```{r}
+conj_treinamento[,-ncol(conj_treinamento)]
+```
+
+
+#### Ridge
+
+Ajustando conjuntos de teste e treinamento para matriz
+
+```{r}
+
+conj_treinamento_matrix <- model.matrix(preditora~., data = conj_treinamento)[, -1]
+
+conj_teste_matrix <- model.matrix(preditora~. , data = conj_teste)[, -1]
+
+```
+
+Treinando o modelo
+
+```{r}
+ridge <- glmnet(conj_treinamento_matrix, conj_treinamento$preditora, alpha = 0, family = "binomial")
+
+summary(ridge)
+```
+Realizando validação cruzada para otimizar lambda
+
+```{r}
+cv.ridge <- cv.glmnet(conj_treinamento_matrix, conj_treinamento$preditora, alpha = 0, family = "binomial")
+best_lambda <- cv.ridge$lambda.min 
+```
+
+```{r}
+best_lambda
+```
+
+Ajustando modelo e realizando as predições
+```{r}
+predicoes_prob <- predict(ridge, s = best_lambda, newx = conj_teste_matrix, type = "response")
+
+predicoes_class <- ifelse(predicoes_prob > 0.5, 1, 0) 
+```
+
+Cálculando a matriz de confusão
+```{r}
+table(Observed = conj_teste$preditora, Predicted = predicoes_class)
+```
+Obtendo a métrica AUC:
+
+```{r}
+roc_obj <- roc(conj_teste$preditora, predicoes_prob)  # Crie o objeto ROC
+auc(roc_obj)  # Calcule a AUC
+```
+Adicionando resposta em tabela de comparação
+
+```{r}
+tb_auc$AUC[tb_auc$modelo == "Ridge"] = auc(roc_obj)
+
+tb_auc
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
