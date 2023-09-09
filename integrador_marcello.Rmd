@@ -1,0 +1,118 @@
+---
+title: "integrador_marcello"
+output: html_document
+date: "2023-09-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(skimr)
+library(ranger)
+library(rsample)
+library(yardstick)
+```
+
+## Carregar dados
+
+```{r}
+dados = read.csv('integrador_final.csv')
+head(dados)
+```
+
+```{r}
+skim(dados)
+```
+```{r}
+
+dados_final <- subset(dados, select = -c(X, comp_id))
+
+set.seed(123)
+
+splits <- initial_split(dados_final, prop = .8, strata = preditora)
+
+dados_tr   <- training(splits)
+dados_test <- testing(splits)
+```
+
+```{r}
+rf <- ranger(preditora ~ ., probability = TRUE, dados_tr)
+
+predito_rf <- predict(rf, dados_test)$predictions[,2]
+
+desempenho <- tibble(prob = predito_rf, 
+                     classes = dados_test$preditora, 
+                     metodo = "floresta aleatória")
+```
+
+```{r}
+desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_auc(classes, prob, event_level = "second") %>% 
+  arrange(desc(.estimate))
+```
+```{r}
+desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_curve(classes, prob, event_level = "second") %>% 
+  autoplot()
+```
+```{r}
+#mtry   # nº de variáveis para testar em cada split
+#ntrees_1 # nº de árvores da floresta
+
+ajusta <- function(mtry, ntrees) {
+
+  rf <- ranger(preditora ~ ., mtry = mtry, num.trees = ntrees, 
+               probability = TRUE, dados_tr)
+  
+  return(rf$prediction.error)
+
+}
+
+resultados <- crossing(mtry = c(2, 4, 8, 13), 
+                       n_arvores = c(1:10, seq(10, 500, 10)))
+
+
+#resultados <- resultados %>% 
+  # mutate(mse = pega a coluna mtry e n_arvores e aplica na função ajusta)
+#  mutate(mse = map2_dbl(mtry, n_arvores, ajusta))
+
+#resultados %>% 
+  # arrange(mse)
+#  ggplot(aes(n_arvores, mse, color = factor(mtry))) +
+#    geom_line()
+
+```
+```{r}
+resultados %>% arrange(mse)
+```
+```{r}
+rf <- ranger(preditora ~ ., probability = TRUE, dados_tr, mtry=2, num.trees = 230, importance = "permutation", local.importance = TRUE)
+
+predito_rf <- predict(rf, dados_test)$predictions[,2]
+
+desempenho <- tibble(prob = predito_rf, 
+                     classes = dados_test$preditora, 
+                     metodo = "floresta aleatória")
+
+desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_auc(classes, prob, event_level = "second") %>% 
+  arrange(desc(.estimate))
+
+desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_curve(classes, prob, event_level = "second") %>% 
+  autoplot()
+```
+
+```{r}
+options(scipen=999)
+data.frame(importance = rf$variable.importance) %>% arrange(desc(importance))
+```
+
