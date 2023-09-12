@@ -237,6 +237,17 @@ tb_auc$AUC[tb_auc$modelo == "Random Forest"] = auc(roc_obj)
 tb_auc
 ```
 
+```{r}
+random_predict$predictions
+```
+```{r}
+library(caret)
+```
+
+
+```{r}
+confusionMatrix(data=random_predict$predictions, reference = as.factor(conj_teste$preditora), positive='1')
+```
 
 
 

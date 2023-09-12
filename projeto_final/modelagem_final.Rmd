@@ -1,0 +1,304 @@
+---
+title: "modelagem_final"
+author: "Murilo Cechin"
+date: "2023-09-12"
+output: html_document
+---
+
+# Modelagem Projeto Integrador
+
+Arquivo de modelagem da atividade integradora.
+
+O grupo selecionou os seguintes algoritimos para realizar a modelagem de classificação:
+
+
+- Random Forest
+- Regressão Logistica
+- Ridge
+- 
+
+
+## Bibliotecas utilizadas no projeto
+
+```{r}
+library(tidyverse)
+library(rsample)
+library(glmnet)
+library(ranger)
+library(pROC)
+library(class)
+library(caret)
+```
+
+## Importando arquivo
+
+```{r}
+df_final = read.csv("D:/Usuário/Documents/MeusProjetos/insper_integrador_09_2023/projeto_final/df_final.csv")
+
+head(df_final, 10)
+```
+
+Antes de proceguir com a modelagem é necessario retirar algumas colunas deste dataframe. Como a coluna X, que representa o index do pré-processamento em python e a coluna comp_id que apenas fornece o código da empresa.
+
+```{r}
+df_final$X <- NULL
+```
+
+```{r}
+df_final$comp_id <- NULL
+```
+
+
+### Colunas com log 
+  Todas as colunas nomeadas com "_log" no final foram processadas utilizando a escala logaritimica de acordo com a seguinte regra:
+  
+  $$ \text{"coluna"\_log}(x) = 
+\begin{cases} 
+\log(x) & \text{se } x > 0 \\
+0 & \text{se } x = 0 \\
+\log(|x|) * -1 & \text{se } x \leq 0 
+
+\end{cases} $$
+
+Caso seja necessario realizar a interpretação do código, rodar a função abaixo:
+
+```{r}
+back_log <- function(x) {
+  if (x > 0) {
+    return(exp(x))
+  } else if (x == 0) {
+    return(0)
+  } else {
+    y <- -1 * x
+    return(exp(y) * -1)
+  }
+}
+```
+
+Aplicando na coluna profit_loss_year_log para demonstrar:
+
+```{r}
+# Antes de aplicar a função
+head(df_final$profit_loss_year_log, 10)
+```
+
+```{r}
+# Aplicando a função
+head(sapply(df_final$profit_loss_year_log, back_log), 10)
+
+```
+
+### Conjunto de teste e treinamento
+
+Separando os conjuntos de teste e treinamento.
+
+Antes, vamos analisar se o cojunto de dados esta desbalanceado.
+
+```{r}
+# Analise das frequencia
+
+df_final %>%
+  group_by(target) %>%
+  summarise(freq_absoluta = n()) %>%
+  mutate(freq_relativa = (freq_absoluta / sum(freq_absoluta))*100)
+
+```
+
+Percebemos que a base de dados apresenta um desbalanceamento significativo, com somente 4% das empresas sendo classificadas como inativas. Devido a essa disparidade, a métrica de acurácia pode não oferecer uma visão completa do desempenho do modelo. Por isso, optaremos pela Sensibilidade como métrica principal, pois ela indica a proporção de verdadeiros positivos que foram corretamente identificados.
+
+Para dividir os conjuntos de treinamento e teste, vamos adotar uma amostragem estratificada, de forma a preservar a proporção da variável alvo.
+
+
+```{r}
+# Configurando semente aleatoria
+set.seed(123)
+
+# Aplicando função factor
+
+df_final$preditora <- factor(df_final$target)
+
+splits <- initial_split(df_final, prop = .8, strata="target")
+
+conj_treinamento <- training(splits)
+conj_teste <- testing(splits)
+```
+
+
+```{r}
+# Conferindo proporção do conjunto de teste
+conj_teste %>%
+  group_by(target) %>%
+  summarise(freq_absoluta = n()) %>%
+  mutate(freq_relativa = (freq_absoluta / sum(freq_absoluta))*100)
+```
+
+
+```{r}
+# Conferindo conjunto de treinamento
+conj_treinamento %>%
+  group_by(target) %>%
+  summarise(freq_absoluta = n()) %>%
+  mutate(freq_relativa = (freq_absoluta / sum(freq_absoluta))*100)
+```
+
+Como pode ser obsevado , a estritificação funcionou.
+
+### Criando Tabela de comparação
+
+Além da métrica de sensibilidade, também será analisada a AUC para obter uma visão geral do desempenho do modelo.
+
+
+```{r}
+tb_metricas <- tibble(
+  modelo = c("Random Forest","Regressão Logistica", "Ridge", "KNN"),
+  AUC = c(NA, NA, NA, NA),
+  Sensibilidade = c(NA, NA, NA, NA)
+)
+
+tb_metricas
+```
+
+
+
+### Random Forest
+
+Criando modelagem com algoritmo random forest.
+
+```{r}
+random <- ranger(preditora ~., data=conj_treinamento)
+
+print(random)
+```
+
+Verificando matrix de confusão:
+
+```{r}
+random$confusion.matrix
+```
+
+Com base na matriz de confusão, o modelo parece estar superajustado e possivelmente está interpolando os dados, acertando todas as classificações.
+
+Para evitar isto, iremos otimizar os hiperparametros de n_trees e Mtry.
+
+```{r}
+# Buscando um número otimo de n_trees
+random_ntree <- tibble(n_arvores = c(1:15, seq(25, 300, 25)), erro = NA)
+
+random_ntree <- random_ntree %>%
+  mutate(erro = map_dbl(n_arvores, ~ranger(target ~ ., num.trees = .x, data=conj_treinamento)$prediction.error))
+
+random_ntree %>% 
+  ggplot(aes(n_arvores, erro)) + 
+    geom_line(color = "#5B5FFF", size = 1.2) + 
+    labs(x = "Número de Árvores", y = "Erro de Classificação (OOB)") + 
+    theme_bw()
+
+```
+Analisando o gráfico gerado, iremos testar entre 50 e 200 árvores.
+
+
+
+```{r}
+# Otimizando o mtry e o número de árvores.
+resultados <- crossing(mtry = c(4, 8, 10, 12, 15, 18, 20, 25, 30, 34), 
+                       n_arvores = c(1, 5, 10, seq(50, 200, 25)))
+
+ajusta <- function(mtry, n_arvores) {
+   random <- ranger(target ~ ., num.trees = n_arvores, mtry = mtry, data = conj_treinamento)
+   return(random$prediction.error)
+}
+
+resultados <- resultados %>% 
+  mutate(erro = map2_dbl(mtry, n_arvores, ajusta))
+
+
+head(resultados)
+```
+
+
+Plotando os resultados
+```{r}
+resultados %>% 
+  mutate(mtry = factor(mtry)) %>% 
+  ggplot(aes(n_arvores, erro, group = mtry, color = mtry)) + 
+    geom_line( size = 1.2) +
+    labs(x = "Número de Árvores", y = "Erro de Classificação (OOB)") +
+    theme_bw()
+```
+Analisando resultados com os menores erros:
+```{r}
+resultados %>%
+  arrange(erro)
+```
+A árvore otimizada será com mtry=12 e n_arvores = 1.
+```{r}
+conj_treinamento$target <- as.factor(conj_treinamento$target)
+
+random_final <- ranger(target ~., data=conj_treinamento, num.trees = 1, mtry=12)
+
+print(random_final)
+```
+Realizando predição no conjunto de teste
+
+```{r}
+# Realizando predições no conjunto de teste
+predicoes_random <- predict(random_final, data = conj_teste)
+
+# Probabilidades da classe positiva 
+probs_random <- predicoes_random$predictions
+
+# Matriz de confusão e sensibilidade
+confusion_random <- confusionMatrix(data=probs_random, reference = as.factor(conj_teste$target), positive='1')
+
+confusion_random
+```
+Obtendo a AUC:
+```{r}
+# Ajustando o formato da variavel
+probs_numeric <- as.numeric(as.character(predicoes_random$predictions)) - 1
+labels_numeric <- as.numeric(as.character(conj_teste$target))
+
+# Utilizando biblioteca pROC para calcular AUC
+
+roc_obj <- roc(labels_numeric, probs_numeric)
+auc_random <- auc(roc_obj)
+
+auc_random
+```
+
+Obtendo a sensibilidade:
+
+```{r}
+sensibilidade_random <- confusion_random$byClass["Sensitivity"]
+sensibilidade_random
+```
+
+Adicionando resultados no tibble de comparação
+
+
+```{r}
+tb_metricas$AUC[tb_metricas$modelo == "Random Forest"] = auc_random
+tb_metricas$Sensibilidade[tb_metricas$modelo == "Random Forest"] = sensibilidade_random
+tb_metricas
+```
+
+
+### Regressão Logistica
+
+Para a realizar a regressão logistica, primeiro será necessario criar as matrizes de entrada.
+
+```{r}
+log_fit <- glm(preditora ~., data = conj_treinamento, family = "binomial")
+
+log_fit
+```
+
+
+
+
+
+
+
+
+
+
