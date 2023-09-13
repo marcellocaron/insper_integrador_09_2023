@@ -15,7 +15,7 @@ O grupo selecionou os seguintes algoritimos para realizar a modelagem de classif
 - Random Forest
 - Regressão Logistica
 - Ridge
-- 
+- XGboost
 
 
 ## Bibliotecas utilizadas no projeto
@@ -48,10 +48,15 @@ df_final$X <- NULL
 df_final$comp_id <- NULL
 ```
 
+```{r}
+df_final
+```
+
+
 
 ### Colunas com log 
   Todas as colunas nomeadas com "_log" no final foram processadas utilizando a escala logaritimica de acordo com a seguinte regra:
-  
+
   $$ \text{"coluna"\_log}(x) = 
 \begin{cases} 
 \log(x) & \text{se } x > 0 \\
@@ -115,7 +120,7 @@ set.seed(123)
 
 # Aplicando função factor
 
-df_final$preditora <- factor(df_final$target)
+df_final$target <- factor(df_final$target)
 
 splits <- initial_split(df_final, prop = .8, strata="target")
 
@@ -141,7 +146,7 @@ conj_treinamento %>%
   mutate(freq_relativa = (freq_absoluta / sum(freq_absoluta))*100)
 ```
 
-Como pode ser obsevado , a estritificação funcionou.
+Como pode ser obsevado , a estratificação funcionou.
 
 ### Criando Tabela de comparação
 
@@ -150,9 +155,8 @@ Além da métrica de sensibilidade, também será analisada a AUC para obter uma
 
 ```{r}
 tb_metricas <- tibble(
-  modelo = c("Random Forest","Regressão Logistica", "Ridge", "KNN"),
+  modelo = c("Random Forest","Regressão Logistica", "Ridge", "XGboost"),
   AUC = c(NA, NA, NA, NA),
-  Sensibilidade = c(NA, NA, NA, NA)
 )
 
 tb_metricas
@@ -165,20 +169,28 @@ tb_metricas
 Criando modelagem com algoritmo random forest.
 
 ```{r}
-random <- ranger(preditora ~., data=conj_treinamento)
+random <- ranger(target ~., data=conj_treinamento)
 
 print(random)
 ```
 
-Verificando matrix de confusão:
-
 ```{r}
-random$confusion.matrix
+teste_random = predict(random, conj_teste)
+
+probs_numeric <- as.numeric(as.character(teste_random$predictions)) - 1
+labels_numeric <- as.numeric(as.character(conj_teste$target))
+
+roc_obj <- roc(labels_numeric, probs_numeric)
+auc_random <- auc(roc_obj)
+
+auc_random
+```
+```{r}
+tb_metricas
 ```
 
-Com base na matriz de confusão, o modelo parece estar superajustado e possivelmente está interpolando os dados, acertando todas as classificações.
 
-Para evitar isto, iremos otimizar os hiperparametros de n_trees e Mtry.
+Otimizando os hiperparametros de n_trees e Mtry.
 
 ```{r}
 # Buscando um número otimo de n_trees
@@ -194,13 +206,13 @@ random_ntree %>%
     theme_bw()
 
 ```
+
+
 Analisando o gráfico gerado, iremos testar entre 50 e 200 árvores.
-
-
 
 ```{r}
 # Otimizando o mtry e o número de árvores.
-resultados <- crossing(mtry = c(4, 8, 10, 12, 15, 18, 20, 25, 30, 34), 
+resultados <- crossing(mtry = c(4, 8, 10, 15, 20, 25, 30), 
                        n_arvores = c(1, 5, 10, seq(50, 200, 25)))
 
 ajusta <- function(mtry, n_arvores) {
@@ -230,11 +242,11 @@ Analisando resultados com os menores erros:
 resultados %>%
   arrange(erro)
 ```
-A árvore otimizada será com mtry=12 e n_arvores = 1.
+A árvore otimizada será com mtry=4 e n_arvores = 100.
 ```{r}
 conj_treinamento$target <- as.factor(conj_treinamento$target)
 
-random_final <- ranger(target ~., data=conj_treinamento, num.trees = 1, mtry=12)
+random_final <- ranger(target ~., data=conj_treinamento, num.trees = 100, mtry=4)
 
 print(random_final)
 ```
@@ -254,11 +266,8 @@ confusion_random
 ```
 Obtendo a AUC:
 ```{r}
-# Ajustando o formato da variavel
 probs_numeric <- as.numeric(as.character(predicoes_random$predictions)) - 1
 labels_numeric <- as.numeric(as.character(conj_teste$target))
-
-# Utilizando biblioteca pROC para calcular AUC
 
 roc_obj <- roc(labels_numeric, probs_numeric)
 auc_random <- auc(roc_obj)
@@ -266,32 +275,109 @@ auc_random <- auc(roc_obj)
 auc_random
 ```
 
-Obtendo a sensibilidade:
-
-```{r}
-sensibilidade_random <- confusion_random$byClass["Sensitivity"]
-sensibilidade_random
-```
 
 Adicionando resultados no tibble de comparação
 
 
 ```{r}
 tb_metricas$AUC[tb_metricas$modelo == "Random Forest"] = auc_random
-tb_metricas$Sensibilidade[tb_metricas$modelo == "Random Forest"] = sensibilidade_random
 tb_metricas
 ```
-
 
 ### Regressão Logistica
 
 Para a realizar a regressão logistica, primeiro será necessario criar as matrizes de entrada.
 
 ```{r}
-log_fit <- glm(preditora ~., data = conj_treinamento, family = "binomial")
+reg_logistica <- glm(target ~ ., data = conj_treinamento, family = "binomial")
 
-log_fit
+reg_logistica
 ```
+
+Cálculando as probabilidades
+
+```{r}
+prob_log <- predict(reg_logistica, conj_teste, type = "response")
+```
+
+Cálculando métrica AUC
+
+```{r}
+roc_log <- roc(conj_teste$target, prob_log)
+
+roc_log
+```
+
+Adicionando AUC para a tabela de resultados
+
+```{r}
+tb_metricas$AUC[tb_metricas$modelo == "Regressão Logistica"] = roc_log$auc
+
+tb_metricas
+```
+
+
+
+### Ridge
+
+Para utilizar o pacote glmnet, primeiro é necessario realizar um tratamento nos conjuntos de teste e treinamento.
+
+```{r}
+conj_treinamento_matrix <- model.matrix(target~., data = conj_treinamento)[, -1]
+
+conj_teste_matrix <- model.matrix(target~. , data = conj_teste)[, -1]
+```
+
+Treinando o modelo
+
+```{r}
+ridge <- glmnet(conj_treinamento_matrix, conj_treinamento$target, alpha = 0, family = "binomial")
+
+summary(ridge)
+```
+
+Realizando validação cruzada para otimizar lambda
+
+```{r}
+cv.ridge <- cv.glmnet(conj_treinamento_matrix, conj_treinamento$target, alpha = 0, family = "binomial")
+best_lambda <- cv.ridge$lambda.min 
+```
+
+```{r}
+best_lambda
+```
+
+Ajustando modelo e realizando as predições
+```{r}
+predicoes_prob <- predict(ridge, s = best_lambda, newx = conj_teste_matrix, type = "response")
+
+predicoes_class <- ifelse(predicoes_prob > 0.5, 1, 0) 
+```
+
+Cálculando a matriz de confusão
+```{r}
+table(Observed = conj_teste$target, Predicted = predicoes_class)
+```
+Obtendo a métrica AUC:
+
+```{r}
+roc_obj <- roc(conj_teste$target, predicoes_prob)  # Crie o objeto ROC
+auc(roc_obj)  # Calcule a AUC
+```
+Adicionando resposta em tabela de comparação
+
+```{r}
+tb_metricas$AUC[tb_metricas$modelo == "Ridge"] = auc(roc_obj)
+
+tb_metricas
+```
+
+
+
+
+
+
+
 
 
 
