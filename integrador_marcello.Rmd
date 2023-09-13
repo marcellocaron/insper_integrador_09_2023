@@ -11,12 +11,16 @@ library(skimr)
 library(ranger)
 library(rsample)
 library(yardstick)
+library(xgboost)
+library(rsample) 
+library(caret)
 ```
 
 ## Carregar dados
 
 ```{r}
 dados = read.csv('integrador_final.csv')
+dados$inoffice_days_per_ceo <- dados$inoffice_days / dados$ceo_count
 head(dados)
 ```
 
@@ -27,6 +31,9 @@ skim(dados)
 
 dados_final <- subset(dados, select = -c(X, comp_id))
 
+#dados_final$preditora <- factor(dados_final$preditora)
+
+
 set.seed(123)
 
 splits <- initial_split(dados_final, prop = .8, strata = preditora)
@@ -36,9 +43,9 @@ dados_test <- testing(splits)
 ```
 
 ```{r}
-rf <- ranger(preditora ~ ., probability = TRUE, dados_tr)
+rf <- ranger(preditora ~ .,  dados_tr)
 
-predito_rf <- predict(rf, dados_test)$predictions[,2]
+predito_rf <- predict(rf, dados_test)$predictions
 
 desempenho <- tibble(prob = predito_rf, 
                      classes = dados_test$preditora, 
@@ -49,7 +56,7 @@ desempenho <- tibble(prob = predito_rf,
 desempenho %>% 
   mutate(classes = factor(classes)) %>% 
   group_by(metodo) %>% 
-  roc_auc(classes, prob, event_level = "second") %>% 
+?roc_auc(classes, prob, event_level = "second") %>% 
   arrange(desc(.estimate))
 ```
 ```{r}
@@ -58,27 +65,30 @@ desempenho %>%
   group_by(metodo) %>% 
   roc_curve(classes, prob, event_level = "second") %>% 
   autoplot()
+
+
 ```
 ```{r}
 #mtry   # nº de variáveis para testar em cada split
 #ntrees_1 # nº de árvores da floresta
 
-ajusta <- function(mtry, ntrees) {
+ajusta <- function(mtry, ntrees, depth) {
 
   rf <- ranger(preditora ~ ., mtry = mtry, num.trees = ntrees, 
-               probability = TRUE, dados_tr)
+               probability = TRUE, dados_tr, max.depth = depth)
   
   return(rf$prediction.error)
 
 }
 
 resultados <- crossing(mtry = c(2, 4, 8, 13), 
-                       n_arvores = c(1:10, seq(10, 500, 10)))
+                       ntrees = c(1:10, seq(10, 500, 10)),
+                       depth = c(3, 5, 7, 9))
 
 
-#resultados <- resultados %>% 
-  # mutate(mse = pega a coluna mtry e n_arvores e aplica na função ajusta)
-#  mutate(mse = map2_dbl(mtry, n_arvores, ajusta))
+resultados <- resultados %>% 
+   #mutate(mse = pega a coluna mtry e n_arvores e aplica na função ajusta)
+  mutate(mse = pmap_dbl(list(mtry, ntrees, depth), ajusta))
 
 #resultados %>% 
   # arrange(mse)
@@ -90,9 +100,15 @@ resultados <- crossing(mtry = c(2, 4, 8, 13),
 resultados %>% arrange(mse)
 ```
 ```{r}
+
+
 rf <- ranger(preditora ~ ., probability = TRUE, dados_tr, mtry=2, num.trees = 230, importance = "permutation", local.importance = TRUE)
 
-predito_rf <- predict(rf, dados_test)$predictions[,2]
+predito_rf <- predict(rf, dados_test, type = "response")$predictions[,2]
+
+rf <- ranger(preditora ~ ., dados_tr, mtry=2, num.trees = 230, importance = "permutation", local.importance = TRUE)
+
+predito_rf <- predict(rf, dados_test)$predictions
 
 desempenho <- tibble(prob = predito_rf, 
                      classes = dados_test$preditora, 
@@ -109,10 +125,155 @@ desempenho %>%
   group_by(metodo) %>% 
   roc_curve(classes, prob, event_level = "second") %>% 
   autoplot()
+
+example <- ?confusionMatrix(data=predito_rf, reference = as.factor(dados_test$preditora), positive='1')
 ```
 
 ```{r}
 options(scipen=999)
 data.frame(importance = rf$variable.importance) %>% arrange(desc(importance))
+```
+```{r}
+library(Matrix)
+
+tr_sparse_matrix <- sparse.model.matrix(preditora ~ ., data = dados_tr)[,-1]
+
+tr_sparse_matrix_scaled <-  scale(tr_sparse_matrix)
+
+d_tr <- xgb.DMatrix(label = dados_tr$preditora, 
+                    data = tr_sparse_matrix_scaled)
+
+xgb_model <- xgboost(data = d_tr, nrounds = 500, max_depth = 4, 
+                      eta = 0.1, nthread = 3, verbose = FALSE,
+                      objective = "binary:logistic")
+
+importancia <- xgb.importance(model = xgb_model)
+
+xgb.plot.importance(importancia, rel_to_first = TRUE, xlab = "Relative Importance", top_n = 10)
+
+test_sparse_matrix <- sparse.model.matrix(preditora ~ ., data = dados_test)[,-1]
+
+test_sparse_matrix_scaled <-  scale(test_sparse_matrix)
+
+d_test <- xgb.DMatrix(label = dados_test$preditora, data = test_sparse_matrix_scaled)
+
+pred_xgb <- predict(xgb_model, d_test)
+
+desempenho <- tibble(prob = pred_xgb, 
+                     classes = dados_test$preditora, 
+                     metodo = "xgboost")
+
+desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_auc(classes, prob, event_level = "second") %>% 
+  arrange(desc(.estimate))
+
+desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_curve(classes, prob, event_level = "second") %>% 
+  autoplot()
+
+```
+```{r}
+set.seed(123)
+
+hiperparametros <- crossing(eta = c(.01, .1), 
+                            nrounds = c(250, 750), 
+                            max_depth = c(1, 4))
+
+
+
+
+ajusta_bst <- function(eta, nrounds, max_depth) {
+  
+  
+  fit <- xgb.train(data = d_tr, nrounds = nrounds, max_depth = max_depth, eta = eta, 
+                   nthread = 10, verbose = FALSE, objective = "binary:logistic")
+  
+  pred_xgb <- predict(fit, d_test)
+
+  desempenho <- tibble(prob = pred_xgb, 
+                     classes = dados_test$preditora, 
+                     metodo = "xgboost")
+
+  return(desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_auc(classes, prob, event_level = "second") %>% 
+  arrange(desc(.estimate)) %>% pull(.estimate))
+  
+  
+}
+
+
+resultados <- 
+  crossing(hiperparametros) %>% 
+  mutate(reqm = pmap_dbl(list(eta, nrounds, max_depth), ajusta_bst))
+
+resultados %>% arrange(desc(reqm))
+```
+
+
+```{r}
+xgb_model <- xgboost(data = d_tr, nrounds = 750, max_depth = 1, 
+                      eta = 0.1, nthread = 10, verbose = FALSE,
+                      objective = "binary:logistic")
+
+xgb_model <- xgboost(data = d_tr, max_depth = 4, num_parallel_tree = 1000, subsample = 0.5, colsample_bytree =0.5, nrounds = 1, objective = "binary:logistic")
+
+
+importancia <- xgb.importance(model = xgb_model)
+
+xgb.plot.importance(importancia, rel_to_first = TRUE, xlab = "Relative Importance", top_n = 10)
+
+test_sparse_matrix <- sparse.model.matrix(preditora ~ ., data = dados_test)[,-1]
+
+test_sparse_matrix_scaled <-  scale(test_sparse_matrix)
+
+d_test <- xgb.DMatrix(label = dados_test$preditora, data = test_sparse_matrix_scaled)
+
+pred_xgb <- predict(xgb_model, d_test)
+
+desempenho <- tibble(prob = pred_xgb, 
+                     classes = dados_test$preditora, 
+                     metodo = "xgboost")
+
+desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_auc(classes, prob, event_level = "second") %>% 
+  arrange(desc(.estimate))
+
+desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_curve(classes, prob, event_level = "second") %>% 
+  autoplot()
+
+lvl = c(0, 1)
+pred_label <- lvl[as.numeric(pred_xgb>=0.5)+1]
+
+
+df_threshold <- desempenho %>% 
+  mutate(classes = factor(classes)) %>% 
+  group_by(metodo) %>% 
+  roc_curve(classes, prob, event_level = "second")
+
+gmeans <- sqrt(df_threshold$sensitivity * df_threshold$specificity)
+
+ideal_threshold <- df_threshold[which.max(gmeans),]$.threshold
+
+pred_ <- as.factor(ifelse(predict(xgb_model, d_test, type="response")>=ideal_threshold,"1","0"))
+
+caret::confusionMatrix(data=pred_, reference = factor(conj_teste$target), positive='1')
+
+```
+```{r}
+library(caret)
+
+sensitivity(data=factor(pred_label), factor(dados_test$preditora), positive="1")
+
 ```
 
